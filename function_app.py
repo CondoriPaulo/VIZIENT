@@ -29,7 +29,7 @@ def _extract_bytes(req: func.HttpRequest) -> bytes:
     return body
 
 
-@app.route(methods=["POST"])
+@app.route(route="", methods=["POST"])
 def ingest_vizient(req: func.HttpRequest) -> func.HttpResponse:
     """
     Receive a Vizient Excel file, clean it, and return JSON for Logic App → SQL.
