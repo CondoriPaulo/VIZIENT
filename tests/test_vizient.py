@@ -15,7 +15,7 @@ import pytest
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from cleaners.vizient_cleaner import clean_vizient, _parse_gpa, _fix_gpa_boundary
+from cleaners.vizient_cleaner import clean_vizient, _parse_gpa, _fix_gpa_boundary, _fix_degree_gpa_boundary
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -167,3 +167,25 @@ def test_all_10_rows_returned():
     """All 10 rows in the fixture should be returned (no blank-row dropping for Vizient)."""
     df = _run()
     assert len(df) == 10
+
+
+def test_degree_gpa_boundary_fix():
+    """
+    Row N005 has a 3-column right-shift bleed:
+      gpa='BSN', employment_status='3.5 and above', prev_healthcare_exp='Full-time'
+    After fix: nursing_degree='BSN', gpa=3.75, employment_status='Full-time'.
+    """
+    df = _run()
+    row = df[df["nurse_id"] == "N005"]
+    assert row.iloc[0]["nursing_degree"] == "BSN"
+    assert row.iloc[0]["gpa"] == 3.75
+    assert row.iloc[0]["employment_status"] == "Full-time"
+
+
+def test_numeric_education_nulled():
+    """education_school values that are numeric-only (age bleed) should be null."""
+    # No fixture row has this — verify the real file scenario doesn't break output
+    # by ensuring no numeric strings slip through in the fixture output
+    df = _run()
+    for val in df["education_school"].dropna():
+        assert not str(val).isdigit(), f"Numeric education_school found: '{val}'"

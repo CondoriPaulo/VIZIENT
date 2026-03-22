@@ -14,6 +14,8 @@ _GPA_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_NURSING_DEGREES = {"bsn", "adn/asn", "msn", "other", "rn", "lpn", "dnp"}
+
 _EMPLOYMENT_STATUSES = {
     "active",
     "terminated",
@@ -36,8 +38,45 @@ _GPA_MIDPOINTS = {
 
 
 # ---------------------------------------------------------------------------
-# GPA boundary fix
+# Boundary fixes
 # ---------------------------------------------------------------------------
+
+def _fix_degree_gpa_boundary(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fix a 3-column right-shift bleed where:
+      - gpa column contains a nursing degree string (BSN, ADN/ASN, etc.)
+      - employment_status column contains a GPA range string
+      - prev_healthcare_exp column contains the real employment status
+
+    Corrects by shifting each affected column one position left.
+    """
+    degree_col = "nursing_degree"
+    gpa_col    = "gpa"
+    emp_col    = "employment_status"
+    prev_col   = "prev_healthcare_exp"
+
+    def _is_degree_like(val) -> bool:
+        return str(val).strip().lower() in _NURSING_DEGREES if pd.notna(val) else False
+
+    def _is_gpa_like(val) -> bool:
+        return bool(_GPA_PATTERN.search(str(val))) if pd.notna(val) else False
+
+    needs_fix = (
+        df[gpa_col].apply(_is_degree_like) &
+        df[emp_col].apply(_is_gpa_like)
+    )
+    fixed_count = int(needs_fix.sum())
+    if fixed_count > 0:
+        logging.warning(
+            "Vizient: 3-column boundary shift (degree/gpa/status) on %d rows", fixed_count
+        )
+        df.loc[needs_fix, degree_col] = df.loc[needs_fix, gpa_col]
+        df.loc[needs_fix, gpa_col]    = df.loc[needs_fix, emp_col]
+        df.loc[needs_fix, emp_col]    = df.loc[needs_fix, prev_col]
+    else:
+        logging.info("Vizient: no degree/gpa/status boundary shift needed")
+    return df
+
 
 def _fix_gpa_boundary(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -96,16 +135,17 @@ def _parse_gpa(val) -> Optional[float]:
 # ---------------------------------------------------------------------------
 
 _COLUMN_RENAME = {
-    "Organization":             "organization",
-    "Cohort Date":              "cohort_date",
-    "Nurse ID":                 "nurse_id",
-    "Education":                "education_school",
-    "Nursing Degree Received":  "nursing_degree",
-    "GPA":                      "gpa",
-    "Employment Status":        "employment_status",
-    "Termination":              "termination_raw",
-    "Termination Date":         "termination_date",
-    "Tenure":                   "tenure_months",
+    "organization":                      "organization",
+    "cohort date":                       "cohort_date",
+    "nurse id":                          "nurse_id",
+    "education (cleaned)":               "education_school",
+    "nursing degree received":           "nursing_degree",
+    "gpa":                               "gpa",
+    "employment status":                 "employment_status",
+    "previous health care work experience": "prev_healthcare_exp",
+    "termination":                       "termination_raw",
+    "termination date":                  "termination_date",
+    "tenure":                            "tenure_months",
 }
 
 _OUTPUT_COLS = [
@@ -138,7 +178,7 @@ def clean_vizient(file_bytes: bytes) -> pd.DataFrame:
     # Step 1: Read Excel — dtype=str so we control all type coercion
     df = pd.read_excel(
         io.BytesIO(file_bytes),
-        sheet_name="Duplicate Vizent for Data Manip",
+        sheet_name="Sheet1",
         dtype=str,
         engine="openpyxl",
     )
@@ -154,22 +194,35 @@ def clean_vizient(file_bytes: bytes) -> pd.DataFrame:
     # Step 3: Rename columns to snake_case
     df = df.rename(columns=_COLUMN_RENAME)
 
-    # Step 4: Fix GPA/employment_status column boundary bleed
+    # Step 4a: Fix 3-column right-shift bleed (degree/gpa/status) — must run first
+    # because it uses prev_healthcare_exp to recover the real employment_status
+    df = _fix_degree_gpa_boundary(df)
+
+    # Step 4b: Fix 2-column swap (GPA ↔ employment_status)
     df = _fix_gpa_boundary(df)
 
-    # Step 5: Parse GPA text ranges → decimal midpoints
+    # Step 5: Nullify education_school values that are numeric-only (bleed from age column)
+    numeric_edu = df["education_school"].str.match(r"^\d+$", na=False)
+    if numeric_edu.sum() > 0:
+        logging.warning(
+            "Vizient: %d rows have a numeric education_school (column bleed) — setting to null",
+            numeric_edu.sum(),
+        )
+        df.loc[numeric_edu, "education_school"] = None
+
+    # Step 6: Parse GPA text ranges → decimal midpoints
     df["gpa"] = df["gpa"].apply(_parse_gpa)
 
-    # Step 6: Parse dates
+    # Step 7: Parse dates
     df["cohort_date"]      = pd.to_datetime(df["cohort_date"],      format="%m/%d/%Y", errors="coerce").dt.date
     df["termination_date"] = pd.to_datetime(df["termination_date"], format="%m/%d/%Y", errors="coerce").dt.date
 
-    # Step 7: Derive is_terminated (1 = Yes, 0 = No/blank)
+    # Step 8: Derive is_terminated (1 = Yes, 0 = No/blank)
     df["is_terminated"] = (
         df["termination_raw"].str.strip().str.lower() == "yes"
     ).astype(int)
 
-    # Step 8: Tenure is stored as decimal years (e.g. 1.5 = 18 months).
+    # Step 9: Tenure is stored as decimal years (e.g. 1.5 = 18 months).
     # Convert to integer months: multiply by 12 and round.
     df["tenure_months"] = (
         pd.to_numeric(df["tenure_months"].str.strip(), errors="coerce") * 12
@@ -180,5 +233,5 @@ def clean_vizient(file_bytes: bytes) -> pd.DataFrame:
             "Vizient: %d active nurses have null tenure_months", len(active_null_tenure)
         )
 
-    # Step 9: Select and order output columns
+    # Step 10: Select and order output columns
     return df[_OUTPUT_COLS].copy()
