@@ -142,7 +142,9 @@ _COLUMN_RENAME = {
     "employment start date":                "employment_start_date",
     "type of unit":                         "type_of_unit",
     "age":                                  "age",
-    "gender education":                     "gender_education",
+    "gender":                               "gender",
+    "gender education":                     "gender",   # fallback if combined
+    "education":                            "education_raw",
     "nursing degree received":              "nursing_degree",
     "gpa":                                  "gpa",
     "employment status":                    "employment_status",
@@ -170,7 +172,8 @@ _OUTPUT_COLS = [
     "type_of_unit",
     # --- Demographics ---
     "age",
-    "gender_education",
+    "gender",
+    "education_raw",
     # --- Education ---
     "education_school",
     "nursing_degree",
@@ -218,10 +221,28 @@ def clean_vizient(file_bytes: bytes) -> pd.DataFrame:
     for col in df.columns:
         df[col] = df[col].str.strip()
 
-    logging.info("Vizient: read %d rows", len(df))
+    logging.info("Vizient: read %d rows — raw columns: %s", len(df), list(df.columns))
 
-    # Step 3: Rename columns to snake_case
-    df = df.rename(columns=_COLUMN_RENAME)
+    # Step 3: Rename columns to snake_case — case-insensitive & whitespace-tolerant
+    # This prevents KeyErrors when Excel headers have extra spaces or mixed casing
+    rename_lower = {k.lower(): v for k, v in _COLUMN_RENAME.items()}
+    actual_rename = {}
+    for actual_col in df.columns:
+        target = rename_lower.get(actual_col.lower())
+        if target:
+            actual_rename[actual_col] = target
+    unmatched = [c for c in df.columns if c not in actual_rename]
+    if unmatched:
+        logging.warning("Vizient: unrecognized columns (not mapped): %s", unmatched)
+    df = df.rename(columns=actual_rename)
+
+    # Step 3b: Guarantee every expected column exists — fill missing ones with None
+    # so downstream steps never raise KeyError even if the Excel file changes shape
+    derived_cols = {"is_terminated", "on_leave"}  # built later in pipeline, not from Excel
+    for col in _OUTPUT_COLS:
+        if col not in derived_cols and col not in df.columns:
+            logging.warning("Vizient: column '%s' missing from file — defaulting to None", col)
+            df[col] = None
 
     # Step 4a: Fix 3-column right-shift bleed (degree/gpa/status) — must run first
     # because it uses prev_healthcare_exp to recover the real employment_status
@@ -248,14 +269,23 @@ def clean_vizient(file_bytes: bytes) -> pd.DataFrame:
     df["termination_date"]      = pd.to_datetime(df["termination_date"],       errors="coerce").dt.date
 
     # Step 8: Derive is_terminated (1 = Yes, 0 = No/blank)
-    df["is_terminated"] = (
-        df["termination_raw"].str.strip().str.lower() == "yes"
-    ).astype(int)
+    # Guard: termination_raw may be None if the column was missing in the file
+    if "termination_raw" in df.columns:
+        df["is_terminated"] = (
+            df["termination_raw"].fillna("").str.strip().str.lower() == "yes"
+        ).astype(int)
+    else:
+        logging.warning("Vizient: 'termination' column not found — is_terminated defaults to 0")
+        df["is_terminated"] = 0
 
     # Step 9: Derive on_leave (BIT: 1 = Yes, 0 = No/blank)
-    df["on_leave"] = (
-        df["leave_raw"].str.strip().str.lower() == "yes"
-    ).astype(int)
+    if "leave_raw" in df.columns:
+        df["on_leave"] = (
+            df["leave_raw"].fillna("").str.strip().str.lower() == "yes"
+        ).astype(int)
+    else:
+        logging.warning("Vizient: 'leave' column not found — on_leave defaults to 0")
+        df["on_leave"] = 0
 
     # Step 10: Tenure is stored as decimal years (e.g. 1.5 = 18 months).
     # Convert to integer months: multiply by 12 and round.

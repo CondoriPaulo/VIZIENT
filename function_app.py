@@ -49,6 +49,10 @@ def ingest_vizient(req: func.HttpRequest) -> func.HttpResponse:
     except ValueError as exc:
         logging.warning("ingest_vizient validation error: %s", exc)
         return func.HttpResponse(str(exc), status_code=400)
-    except Exception:
+    except Exception as exc:
         logging.exception("Unexpected error in ingest_vizient")
-        return func.HttpResponse("Internal server error", status_code=500)
+        # Return the real error message so Logic App run history shows the cause
+        return func.HttpResponse(
+            f"Internal server error: {type(exc).__name__}: {exc}",
+            status_code=500,
+        )
