@@ -43,7 +43,7 @@ def ingest_vizient(req: func.HttpRequest) -> func.HttpResponse:
         file_bytes = _extract_bytes(req)
         df = clean_vizient(file_bytes)
         rows = df.where(pd.notnull(df), None).to_dict(orient="records")
-        payload = json.dumps({"table": "fact_nurse", "rows": rows}, default=str)
+        payload = json.dumps({"table": "fact_vizient_nurse", "rows": rows}, default=str)
         logging.info("ingest_vizient: returning %d rows", len(rows))
         return func.HttpResponse(payload, status_code=200, mimetype="application/json")
     except ValueError as exc:

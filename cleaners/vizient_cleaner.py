@@ -131,33 +131,62 @@ def _parse_gpa(val) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
-# Column rename map
+# Column rename map  (ALL 21 Excel columns → snake_case)
 # ---------------------------------------------------------------------------
 
 _COLUMN_RENAME = {
-    "organization":                      "organization",
-    "cohort date":                       "cohort_date",
-    "nurse id":                          "nurse_id",
-    "education (cleaned)":               "education_school",
-    "nursing degree received":           "nursing_degree",
-    "gpa":                               "gpa",
-    "employment status":                 "employment_status",
+    "organization":                         "organization",
+    "cohort date":                          "cohort_date",
+    "nurse id":                             "nurse_id",
+    "deid_names":                           "deid_names",
+    "employment start date":                "employment_start_date",
+    "type of unit":                         "type_of_unit",
+    "age":                                  "age",
+    "gender education":                     "gender_education",
+    "nursing degree received":              "nursing_degree",
+    "gpa":                                  "gpa",
+    "employment status":                    "employment_status",
     "previous health care work experience": "prev_healthcare_exp",
-    "termination":                       "termination_raw",
-    "termination date":                  "termination_date",
-    "tenure":                            "tenure_months",
+    "leave":                                "leave_raw",
+    "type of leave":                        "type_of_leave",
+    "termination":                          "termination_raw",
+    "termination date":                     "termination_date",
+    "tenure":                               "tenure_months",
+    "termination reason":                   "termination_reason",
+    "termination updated by":               "termination_updated_by",
+    "education (cleaned)":                  "education_school",
+    "id":                                   "source_id",
 }
 
 _OUTPUT_COLS = [
+    # --- Identity ---
     "nurse_id",
+    "source_id",
+    "deid_names",
+    # --- Organization & Cohort ---
     "organization",
     "cohort_date",
+    "employment_start_date",
+    "type_of_unit",
+    # --- Demographics ---
+    "age",
+    "gender_education",
+    # --- Education ---
     "education_school",
     "nursing_degree",
     "gpa",
+    # --- Employment ---
     "employment_status",
+    "prev_healthcare_exp",
+    # --- Leave ---
+    "on_leave",
+    "type_of_leave",
+    # --- Termination ---
     "is_terminated",
     "termination_date",
+    "termination_reason",
+    "termination_updated_by",
+    # --- Tenure ---
     "tenure_months",
 ]
 
@@ -213,16 +242,22 @@ def clean_vizient(file_bytes: bytes) -> pd.DataFrame:
     # Step 6: Parse GPA text ranges → decimal midpoints
     df["gpa"] = df["gpa"].apply(_parse_gpa)
 
-    # Step 7: Parse dates
-    df["cohort_date"]      = pd.to_datetime(df["cohort_date"],      format="%m/%d/%Y", errors="coerce").dt.date
-    df["termination_date"] = pd.to_datetime(df["termination_date"], format="%m/%d/%Y", errors="coerce").dt.date
+    # Step 7: Parse dates (cohort, employment start, termination)
+    df["cohort_date"]           = pd.to_datetime(df["cohort_date"],           errors="coerce").dt.date
+    df["employment_start_date"] = pd.to_datetime(df["employment_start_date"], errors="coerce").dt.date
+    df["termination_date"]      = pd.to_datetime(df["termination_date"],       errors="coerce").dt.date
 
     # Step 8: Derive is_terminated (1 = Yes, 0 = No/blank)
     df["is_terminated"] = (
         df["termination_raw"].str.strip().str.lower() == "yes"
     ).astype(int)
 
-    # Step 9: Tenure is stored as decimal years (e.g. 1.5 = 18 months).
+    # Step 9: Derive on_leave (BIT: 1 = Yes, 0 = No/blank)
+    df["on_leave"] = (
+        df["leave_raw"].str.strip().str.lower() == "yes"
+    ).astype(int)
+
+    # Step 10: Tenure is stored as decimal years (e.g. 1.5 = 18 months).
     # Convert to integer months: multiply by 12 and round.
     df["tenure_months"] = (
         pd.to_numeric(df["tenure_months"].str.strip(), errors="coerce") * 12
@@ -233,5 +268,8 @@ def clean_vizient(file_bytes: bytes) -> pd.DataFrame:
             "Vizient: %d active nurses have null tenure_months", len(active_null_tenure)
         )
 
-    # Step 10: Select and order output columns
+    # Step 11: Age — keep as string (Vizient may store age ranges like "25-30")
+    # No coercion needed; stored as NVARCHAR in SQL.
+
+    # Step 12: Select and order output columns
     return df[_OUTPUT_COLS].copy()
